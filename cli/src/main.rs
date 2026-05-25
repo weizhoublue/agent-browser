@@ -1,3 +1,4 @@
+mod cdp_auth;
 mod chat;
 mod color;
 mod commands;
@@ -794,6 +795,12 @@ fn main() {
         }
     };
 
+    cdp_auth::apply_launch_cdp_auth(
+        &mut cmd,
+        flags.cdp_token.as_deref(),
+        flags.cdp_headers.as_deref(),
+    );
+
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
         if cmd.get("password").is_some() {
@@ -909,6 +916,8 @@ fn main() {
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
+        cdp_token: flags.cdp_token.as_deref(),
+        cdp_headers: flags.cdp_headers.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
         plugins: Some(plugin_registry_json.as_str()),
     };
@@ -1154,6 +1163,12 @@ fn main() {
             if let Some(ref dp) = flags.download_path {
                 launch_cmd["downloadPath"] = json!(dp);
             }
+
+            cdp_auth::apply_launch_cdp_auth(
+                &mut launch_cmd,
+                flags.cdp_token.as_deref(),
+                flags.cdp_headers.as_deref(),
+            );
 
             let err = match send_command(launch_cmd, &flags.session) {
                 Ok(resp) if resp.success => None,

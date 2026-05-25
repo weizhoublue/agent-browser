@@ -414,6 +414,8 @@ pub struct DaemonOptions<'a> {
     pub idle_timeout: Option<&'a str>,
     pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
+    pub cdp_token: Option<&'a str>,
+    pub cdp_headers: Option<&'a str>,
     pub no_auto_dialog: bool,
     pub plugins: Option<&'a str>,
 }
@@ -509,6 +511,12 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
+    }
+    if let Some(token) = opts.cdp_token {
+        cmd.env("AGENT_BROWSER_CDP_TOKEN", token);
+    }
+    if let Some(headers) = opts.cdp_headers {
+        cmd.env("AGENT_BROWSER_CDP_HEADERS", headers);
     }
     if opts.no_auto_dialog {
         cmd.env("AGENT_BROWSER_NO_AUTO_DIALOG", "1");

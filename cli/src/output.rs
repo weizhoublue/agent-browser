@@ -3175,6 +3175,7 @@ pub fn print_help() {
     println!(
         r#"
 agent-browser - fast browser automation CLI for AI agents
+Supports CloakBrowser (CloakBrowser-Manager CDP path + Bearer auth)
 
 Usage: agent-browser <command> [args] [options]
 
@@ -3434,6 +3435,9 @@ Configuration:
   Plugin example:
     {{"plugins":[{{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]}},{{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}}]}}
 
+  Example ~/.agent-browser/config.json (CloakBrowser Manager CDP defaults):
+    {{"cdp": "http://<host>:8080/api/profiles/<uuid>/cdp", "cdpToken": "<token>"}}
+
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
   AGENT_BROWSER_SESSION          Session name (default: "default")
@@ -3524,6 +3528,8 @@ iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios device list                         # List simulators
   agent-browser -p ios swipe up                            # Swipe gesture
   agent-browser -p ios tap @e1                             # Touch element
+
+Supports CloakBrowser (CloakBrowser-Manager CDP path + Bearer auth)
 "#
     );
 }

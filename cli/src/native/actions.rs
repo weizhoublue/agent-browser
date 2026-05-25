@@ -1801,7 +1801,11 @@ async fn auto_launch(
     write_extensions_file(&state.session_id);
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
-        let mgr = BrowserManager::connect_cdp(&cdp).await?;
+        let cdp_headers = crate::cdp_auth::parse_cdp_auth_headers(
+            env::var("AGENT_BROWSER_CDP_TOKEN").ok().as_deref(),
+            env::var("AGENT_BROWSER_CDP_HEADERS").ok().as_deref(),
+        )?;
+        let mgr = BrowserManager::connect_cdp_with_auth(&cdp, cdp_headers).await?;
         state.reset_input_state();
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
@@ -2253,8 +2257,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     )?;
 
     if let Some(url) = cdp_url {
+        let cdp_headers = crate::cdp_auth::parse_cdp_auth_from_launch_cmd(cmd)?;
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(url).await?);
+        state.browser = Some(BrowserManager::connect_cdp_with_auth(url, cdp_headers).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -2265,8 +2270,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }
 
     if let Some(port) = cdp_port {
+        let cdp_headers = crate::cdp_auth::parse_cdp_auth_from_launch_cmd(cmd)?;
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
+        state.browser = Some(
+            BrowserManager::connect_cdp_with_auth(&port.to_string(), cdp_headers).await?,
+        );
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
