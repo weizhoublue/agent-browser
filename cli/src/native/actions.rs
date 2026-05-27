@@ -1908,9 +1908,21 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         let was_external = mgr.is_cdp_connection();
         let hash_changed = !is_external && state.launch_hash != Some(new_hash);
         let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
+        let cdp_endpoint_changed = if was_external && is_external {
+            if let Some(url) = cdp_url {
+                super::browser::cdp_endpoints_differ(url, mgr.get_cdp_url())
+            } else if let Some(port) = cdp_port {
+                super::browser::cdp_endpoints_differ(&port.to_string(), mgr.get_cdp_url())
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         is_external != was_external
             || hash_changed
             || storage_state_requires_clean_launch
+            || cdp_endpoint_changed
             || mgr.has_process_exited()
             || !mgr.is_connection_alive().await
     } else {

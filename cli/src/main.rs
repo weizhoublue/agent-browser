@@ -46,6 +46,12 @@ fn print_json_value(value: serde_json::Value) {
     println!("{}", serialize_json_value(&value));
 }
 
+/// True when the parsed command is an explicit CDP connect (`launch` + `cdpUrl` / `cdpPort`).
+fn command_has_explicit_cdp_endpoint(cmd: &serde_json::Value) -> bool {
+    cmd.get("action").and_then(|v| v.as_str()) == Some("launch")
+        && (cmd.get("cdpUrl").is_some() || cmd.get("cdpPort").is_some())
+}
+
 fn print_json_error(message: impl AsRef<str>) {
     print_json_value(json!({
         "success": false,
@@ -993,7 +999,9 @@ fn main() {
             })
         };
 
-        if !daemon_result.already_running {
+        // Skip config/default CDP auto-launch when the user command is `connect <url|port>`
+        // so we do not connect to config profile A before `connect` profile B runs.
+        if !daemon_result.already_running && !command_has_explicit_cdp_endpoint(&cmd) {
             let mut launch_cmd = launch_cmd;
 
             if flags.ignore_https_errors {
@@ -1435,6 +1443,22 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_command_has_explicit_cdp_endpoint() {
+        assert!(command_has_explicit_cdp_endpoint(&json!({
+            "action": "launch",
+            "cdpUrl": "http://localhost/cdp"
+        })));
+        assert!(command_has_explicit_cdp_endpoint(&json!({
+            "action": "launch",
+            "cdpPort": 9222
+        })));
+        assert!(!command_has_explicit_cdp_endpoint(&json!({
+            "action": "navigate",
+            "url": "https://example.com"
+        })));
+    }
 
     #[test]
     fn test_parse_proxy_simple() {

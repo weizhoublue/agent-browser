@@ -3146,6 +3146,10 @@ Configuration:
   Example ~/.agent-browser/config.json (CloakBrowser Manager CDP defaults):
     {{"cdp": "http://<host>:8080/api/profiles/<uuid>/cdp", "cdpToken": "<token>"}}
 
+  Multiple terminals / profiles: set a different AGENT_BROWSER_SESSION per terminal
+  and connect (or AGENT_BROWSER_CDP) to each profile UUID. Without a unique session,
+  all CLIs share the "default" daemon. See docs/get-started.md.
+
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
   AGENT_BROWSER_SESSION          Session name (default: "default")
