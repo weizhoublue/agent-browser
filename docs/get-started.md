@@ -209,10 +209,75 @@ agent-browser snapshot
 说明：
 
 - 首次带 `cdp` 的命令会拉起 daemon，并通过 Manager CDP 连接（Bearer 由 `cdpToken` 提供）。
-- `connect <url>` **仍需要**传入 URL；若已在配置里写了 `cdp`，日常请用 `open` / `snapshot`，不要与 `connect` 混用，以免边缘情况下重复 launch。
+- `connect <url>` 可显式指定与 `config.json` 中**不同**的 profile；CLI 会跳过「先用 config 连一次」的步骤，并在 CDP 地址变化时自动重连。
 - 修改配置文件后，若 daemon 已在运行，需 `agent-browser close` 再执行下一条命令，新配置才会生效。
 
-### 5. CLI 参数一览（CDP 相关）
+### 5. 两套 CLI 流水线并行（避免 CDP 竞争）
+
+若同时在两个终端（或两条 CI job）里操作 **不同的 Manager profile**，必须同时做到：
+
+1. **每个终端使用不同的 session**（否则共用 `default` daemon，必然串线）。
+2. **每个 session 指向不同的 profile UUID**（否则远程是同一个 Cloak 浏览器，`tab` 会互相看见）。
+
+`~/.agent-browser/config.json` 里的 `cdp` 只适合作为**单 profile 的默认**；多 profile 并行时，请为每个终端单独指定 CDP（`connect` 或环境变量），不要指望两个终端靠同一份 config 连到不同 profile。
+
+#### 终端 A（profile A）
+
+```bash
+export AGENT_BROWSER_SESSION=cloak-pipeline-a
+export MANAGER_HOST="100.117.111.4:8080"
+export PROFILE_UUID_A="86ae5c01-d36b-4beb-ab41-728febccf811"
+export AUTH_TOKEN="lanwz128068"
+
+# 方式 1：显式 connect（推荐，意图最清楚）
+agent-browser close
+agent-browser connect "http://${MANAGER_HOST}/api/profiles/${PROFILE_UUID_A}/cdp" \
+  --cdp-token "${AUTH_TOKEN}"
+agent-browser get cdp-url    # 应含 PROFILE_UUID_A
+
+# 方式 2：仅用环境变量（在首次命令前 export；会覆盖 config.json 中的 cdp）
+# export AGENT_BROWSER_CDP="http://${MANAGER_HOST}/api/profiles/${PROFILE_UUID_A}/cdp"
+# export AGENT_BROWSER_CDP_TOKEN="${AUTH_TOKEN}"
+# agent-browser close
+# agent-browser open https://huggingface.co
+```
+
+#### 终端 B（profile B）
+
+```bash
+export AGENT_BROWSER_SESSION=cloak-pipeline-b
+export MANAGER_HOST="100.117.111.4:8080"
+export PROFILE_UUID_B="e7326b69-a3a4-427a-a5d0-f4a7386a0900"
+export AUTH_TOKEN="lanwz128068"
+
+agent-browser close
+agent-browser connect "http://${MANAGER_HOST}/api/profiles/${PROFILE_UUID_B}/cdp" \
+  --cdp-token "${AUTH_TOKEN}"
+agent-browser get cdp-url    # 应含 PROFILE_UUID_B，而不是 A
+
+agent-browser open https://github.com
+agent-browser tab
+```
+
+#### 自检清单
+
+| 检查项 | 终端 A | 终端 B |
+|--------|--------|--------|
+| `agent-browser session` | `cloak-pipeline-a` | `cloak-pipeline-b` |
+| `agent-browser get cdp-url` | 含 `PROFILE_UUID_A` | 含 `PROFILE_UUID_B` |
+| `agent-browser tab` | 仅 A 打开的页面 | 仅 B 打开的页面 |
+
+#### 常见错误
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| 两终端 `tab` 内容相同 | 未设 `AGENT_BROWSER_SESSION`，共用 `default` | 每终端 `export AGENT_BROWSER_SESSION=...` |
+| `connect` B 但 `get cdp-url` 仍是 A | 旧版 bug 或 session 相同；改 config 后未 `close` | 升级本仓库构建；分 session；`close` 后再 `connect` |
+| 有 config 且两终端都只 `open`、未分 profile | config 中同一 `cdp`，远程同一浏览器 | 每终端 `connect` 或 `AGENT_BROWSER_CDP` 指向不同 UUID |
+
+全局 `config.json` 可继续写**常用 profile 的 token**（`cdpToken`），但多 profile 时 **`cdp` 字段建议只作单终端默认**，或留空、改由每终端 `connect` / `AGENT_BROWSER_CDP` 指定。
+
+### 6. CLI 参数一览（CDP 相关）
 
 | 参数 | 环境变量 | 作用 |
 |------|----------|------|
@@ -223,7 +288,7 @@ agent-browser snapshot
 
 `--headers` **仅用于** `open` 等导航，**不**替代 `--cdp-token`。
 
-### 6. 与上游相同的其它 CDP 形式
+### 7. 与上游相同的其它 CDP 形式
 
 本增强**同时保留**上游行为：
 
@@ -265,6 +330,7 @@ $AB snapshot | grep -i '<your-username>'   # 应能看到已登录用户名相�
 | 404 Profile not running | Manager 未 Launch | UI 中 Launch profile |
 | 连到 `host:8080/json/version`（无 path） | 用了未编译的本仓库二进制 | `cargo build` 后用 `target/.../agent-browser` |
 | `connect` 成功但页面未登录 | 连错 profile 或 HF 会话过期 | 在 noVNC 确认登录；换 UUID |
+| 两终端操作互相影响 | 未分 `AGENT_BROWSER_SESSION` 或同一 CDP profile | 见 [两套 CLI 流水线并行](#5-两套-cli-流水线并行避免-cdp-竞争) |
 | 改了 `--cdp-token` 或配置文件仍无效 | 旧 daemon 仍在 | `agent-browser close` 后重连 |
 | 配置了 `cdp` 但未连上 Manager | 路径写错或未 `close` | 核对 `~/.agent-browser/config.json`；改配置后先 `close` |
 | WS 401、HTTP 200 | 仅发现带了 token，需确认已用本仓库构建 | 见上 |

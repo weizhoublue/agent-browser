@@ -1761,10 +1761,97 @@ async fn resolve_cdp_url(
     ))
 }
 
+/// Canonical host:port/path key for comparing CDP endpoints (ignores scheme).
+fn cdp_endpoint_key(input: &str) -> Option<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+
+    // Port-only connect (e.g. `connect 9222`).
+    if !input.contains('/') && !input.contains('.') {
+        if let Ok(port) = input.parse::<u16>() {
+            return Some(format!("127.0.0.1:{port}"));
+        }
+    }
+
+    if !(input.starts_with("ws://")
+        || input.starts_with("wss://")
+        || input.starts_with("http://")
+        || input.starts_with("https://"))
+    {
+        return None;
+    }
+
+    let parsed = url::Url::parse(input).ok()?;
+    let host = parsed.host_str()?;
+    let port = parsed.port().unwrap_or_else(|| {
+        if parsed.scheme() == "https" || parsed.scheme() == "wss" {
+            443
+        } else {
+            80
+        }
+    });
+    let path = parsed.path().trim_end_matches('/');
+    Some(format!("{host}:{port}{path}"))
+}
+
+/// True when an explicit `connect` / `launch` CDP target does not match the active connection.
+pub fn cdp_endpoints_differ(requested: &str, connected_ws_url: &str) -> bool {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return false;
+    }
+
+    // Pure port: compare host:port only (ignore WS debugger path suffix).
+    if !requested.contains('/') && !requested.contains('.') {
+        if let Ok(port) = requested.parse::<u16>() {
+            let connected = url::Url::parse(connected_ws_url).ok();
+            return connected
+                .map(|u| u.port().unwrap_or(9222) != port || u.host_str() != Some("127.0.0.1"))
+                .unwrap_or(true);
+        }
+    }
+
+    match (
+        cdp_endpoint_key(requested),
+        cdp_endpoint_key(connected_ws_url),
+    ) {
+        (Some(a), Some(b)) => a != b,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::time::sleep;
+
+    #[test]
+    fn test_cdp_endpoints_differ_same_profile_http_vs_ws() {
+        let a = "http://100.117.111.4:8080/api/profiles/86ae5c01-d36b-4beb-ab41-728febccf811/cdp";
+        let b = "ws://100.117.111.4:8080/api/profiles/86ae5c01-d36b-4beb-ab41-728febccf811/cdp";
+        assert!(!cdp_endpoints_differ(a, b));
+    }
+
+    #[test]
+    fn test_cdp_endpoints_differ_different_profile_uuids() {
+        let a = "http://100.117.111.4:8080/api/profiles/86ae5c01-d36b-4beb-ab41-728febccf811/cdp";
+        let b = "ws://100.117.111.4:8080/api/profiles/e7326b69-a3a4-427a-a5d0-f4a7386a0900/cdp";
+        assert!(cdp_endpoints_differ(a, b));
+    }
+
+    #[test]
+    fn test_cdp_endpoints_differ_port_only_same_port() {
+        let connected = "ws://127.0.0.1:9222/devtools/browser/abc";
+        assert!(!cdp_endpoints_differ("9222", connected));
+    }
+
+    #[test]
+    fn test_cdp_endpoints_differ_port_only_different_port() {
+        let connected = "ws://127.0.0.1:9222/devtools/browser/abc";
+        assert!(cdp_endpoints_differ("9223", connected));
+    }
 
     #[test]
     fn test_format_tab_id() {

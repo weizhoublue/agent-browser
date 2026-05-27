@@ -2862,6 +2862,8 @@ mod tests {
             init_scripts: Vec::new(),
             enable: Vec::new(),
             cdp: None,
+            cdp_token: None,
+            cdp_headers: None,
             profile: None,
             state: None,
             proxy: None,
