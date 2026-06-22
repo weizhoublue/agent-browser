@@ -89,6 +89,7 @@ jobs:
             echo "::error::Branch origin/${{ env.ENHANCEMENT_BRANCH }} not found on fork"
             exit 1
           fi
+          git checkout -B main origin/main
           git checkout -B "${{ env.ENHANCEMENT_BRANCH }}" "origin/${{ env.ENHANCEMENT_BRANCH }}"
           if ! git rebase main; then
             echo "::error::Rebase of '${{ env.ENHANCEMENT_BRANCH }}' onto main failed (conflicts). Resolve locally, then re-run."
