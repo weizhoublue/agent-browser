@@ -1,5 +1,5 @@
 # Manual build: checkout any ref (branch / commit / tag), build agent-browser for 3 platforms, upload CI artifacts.
-name: Cloak Build
+name: Welan Build Binary
 
 on:
   workflow_dispatch:

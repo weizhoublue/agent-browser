@@ -1,6 +1,6 @@
 # Manual release: sync upstream vercel-labs/agent-browser main → fork main,
 # rebase cloak onto main, build agent-browser binaries, publish GitHub Release + release/<tag> branch.
-name: Cloak Release
+name: Welan Release
 
 on:
   workflow_dispatch:
@@ -77,13 +77,7 @@ jobs:
 
       - name: Sync upstream main to fork main
         run: |
-          set -euo pipefail
-          git checkout -B main
-          # Use upstream/main ref directly (GITHUB_ENV is only for later steps)
-          git reset --hard upstream/main
-          git push origin main --force
-          echo "fork main now at upstream/main:"
-          git log -1 --oneline
+          git push --force origin "upstream/main:main"
 
       - name: Rebase cloak onto local main
         run: |
