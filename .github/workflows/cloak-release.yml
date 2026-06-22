@@ -16,7 +16,6 @@ concurrency:
 
 permissions:
   contents: write
-  workflows: write
 
 env:
   UPSTREAM_REPO: vercel-labs/agent-browser
@@ -78,7 +77,10 @@ jobs:
 
       - name: Sync upstream main to fork main
         run: |
-          git push --force origin "upstream/main:main"
+          git checkout upstream/main
+          git checkout origin/main -- .github/workflows/
+          git commit -m "Exclude workflows from upstream sync" || true
+          git push --force origin HEAD:main
 
       - name: Rebase cloak onto local main
         run: |
