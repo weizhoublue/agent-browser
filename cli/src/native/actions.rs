@@ -2093,7 +2093,11 @@ async fn auto_launch(
     write_extensions_file(&state.session_id);
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
-        let mgr = BrowserManager::connect_cdp(&cdp).await?;
+        let cdp_headers = crate::cdp_auth::parse_cdp_auth_headers(
+            env::var("AGENT_BROWSER_CDP_TOKEN").ok().as_deref(),
+            env::var("AGENT_BROWSER_CDP_HEADERS").ok().as_deref(),
+        )?;
+        let mgr = BrowserManager::connect_cdp_with_auth(&cdp, cdp_headers).await?;
         let hash = launch_hash(
             &options,
             &state.plugin_init_scripts,
@@ -2754,9 +2758,21 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         let was_external = mgr.is_cdp_connection();
         let hash_changed = state.launch_hash != Some(new_hash);
         let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
+        let cdp_endpoint_changed = if was_external && is_external {
+            if let Some(url) = cdp_url {
+                super::browser::cdp_endpoints_differ(url, mgr.get_cdp_url())
+            } else if let Some(port) = cdp_port {
+                super::browser::cdp_endpoints_differ(&port.to_string(), mgr.get_cdp_url())
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         is_external != was_external
             || hash_changed
             || storage_state_requires_clean_launch
+            || cdp_endpoint_changed
             || mgr.has_process_exited()
             || !mgr.is_connection_alive().await
     } else {
@@ -2788,8 +2804,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     )?;
 
     if let Some(url) = cdp_url {
+        let cdp_headers = crate::cdp_auth::parse_cdp_auth_from_launch_cmd(cmd)?;
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(url).await?);
+        state.browser = Some(BrowserManager::connect_cdp_with_auth(url, cdp_headers).await?);
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -2802,8 +2819,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }
 
     if let Some(port) = cdp_port {
+        let cdp_headers = crate::cdp_auth::parse_cdp_auth_from_launch_cmd(cmd)?;
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
+        state.browser = Some(
+            BrowserManager::connect_cdp_with_auth(&port.to_string(), cdp_headers).await?,
+        );
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();

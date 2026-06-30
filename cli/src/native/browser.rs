@@ -7,7 +7,7 @@ use tokio::sync::{broadcast, Mutex};
 
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
-use super::cdp::discovery::discover_cdp_url;
+use super::cdp::discovery::{discover_cdp_http_endpoint, discover_cdp_url_with_auth};
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
 use super::element::{resolve_element_object_id, RefMap};
@@ -435,6 +435,13 @@ impl BrowserManager {
         Self::connect_cdp_inner(url, false, None).await
     }
 
+    pub async fn connect_cdp_with_auth(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false, headers).await
+    }
+
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
     /// Skips browser-level Target.* commands that most proxies don't support.
     pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
@@ -453,7 +460,7 @@ impl BrowserManager {
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
-        let ws_url = resolve_cdp_url(url).await?;
+        let ws_url = resolve_cdp_url(url, headers.clone()).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
             client,
@@ -1678,16 +1685,22 @@ fn lightpanda_target_init_timeout(last_error: Option<&str>) -> String {
     message
 }
 
-async fn resolve_cdp_url(input: &str) -> Result<String, String> {
+async fn resolve_cdp_url(
+    input: &str,
+    headers: Option<Vec<(String, String)>>,
+) -> Result<String, String> {
+    use std::time::Duration;
+
+    let header_slice = headers.as_ref().map(|v| v.as_slice());
+    let discovery_timeout = Duration::from_secs(15);
+
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
     }
 
     if input.starts_with("http://") || input.starts_with("https://") {
         let parsed = url::Url::parse(input).map_err(|e| format!("Invalid CDP URL: {}", e))?;
-        // If no explicit port and path is empty/root, this is likely a provider
-        // WebSocket endpoint (e.g. https://xxx.cdp0.browser-use.com). Convert
-        // the scheme to ws/wss and connect directly instead of probing :9222.
+        // Provider WebSocket endpoint (no port, root path).
         if parsed.port().is_none() && (parsed.path().is_empty() || parsed.path() == "/") {
             let ws_scheme = if input.starts_with("https://") {
                 "wss"
@@ -1698,17 +1711,48 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
             let _ = ws_url.set_scheme(ws_scheme);
             return Ok(ws_url.to_string());
         }
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| format!("No host in CDP URL: {}", input))?;
-        let port = parsed.port().unwrap_or(9222);
+
+        let path = parsed.path();
         let query = parsed.query().map(|q| q.to_string());
-        return discover_cdp_url(host, port, query.as_deref()).await;
+
+        if path.is_empty() || path == "/" {
+            let host = parsed
+                .host_str()
+                .ok_or_else(|| format!("No host in CDP URL: {}", input))?;
+            let port = parsed.port().unwrap_or(9222);
+            return discover_cdp_url_with_auth(
+                host,
+                port,
+                query.as_deref(),
+                header_slice,
+                discovery_timeout,
+            )
+            .await;
+        }
+
+        // Non-root HTTP base (e.g. CloakBrowser Manager /api/profiles/{id}/cdp).
+        let mut base = parsed.clone();
+        base.set_query(None);
+        base.set_fragment(None);
+        let base_str = base.to_string().trim_end_matches('/').to_string();
+        return discover_cdp_http_endpoint(
+            &base_str,
+            query.as_deref(),
+            header_slice,
+            discovery_timeout,
+        )
+        .await;
     }
 
-    // Try as numeric port
     if let Ok(port) = input.parse::<u16>() {
-        return discover_cdp_url("127.0.0.1", port, None).await;
+        return discover_cdp_url_with_auth(
+            "127.0.0.1",
+            port,
+            None,
+            header_slice,
+            discovery_timeout,
+        )
+        .await;
     }
 
     Err(format!(
@@ -1717,10 +1761,97 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     ))
 }
 
+/// Canonical host:port/path key for comparing CDP endpoints (ignores scheme).
+fn cdp_endpoint_key(input: &str) -> Option<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+
+    // Port-only connect (e.g. `connect 9222`).
+    if !input.contains('/') && !input.contains('.') {
+        if let Ok(port) = input.parse::<u16>() {
+            return Some(format!("127.0.0.1:{port}"));
+        }
+    }
+
+    if !(input.starts_with("ws://")
+        || input.starts_with("wss://")
+        || input.starts_with("http://")
+        || input.starts_with("https://"))
+    {
+        return None;
+    }
+
+    let parsed = url::Url::parse(input).ok()?;
+    let host = parsed.host_str()?;
+    let port = parsed.port().unwrap_or_else(|| {
+        if parsed.scheme() == "https" || parsed.scheme() == "wss" {
+            443
+        } else {
+            80
+        }
+    });
+    let path = parsed.path().trim_end_matches('/');
+    Some(format!("{host}:{port}{path}"))
+}
+
+/// True when an explicit `connect` / `launch` CDP target does not match the active connection.
+pub fn cdp_endpoints_differ(requested: &str, connected_ws_url: &str) -> bool {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return false;
+    }
+
+    // Pure port: compare host:port only (ignore WS debugger path suffix).
+    if !requested.contains('/') && !requested.contains('.') {
+        if let Ok(port) = requested.parse::<u16>() {
+            let connected = url::Url::parse(connected_ws_url).ok();
+            return connected
+                .map(|u| u.port().unwrap_or(9222) != port || u.host_str() != Some("127.0.0.1"))
+                .unwrap_or(true);
+        }
+    }
+
+    match (
+        cdp_endpoint_key(requested),
+        cdp_endpoint_key(connected_ws_url),
+    ) {
+        (Some(a), Some(b)) => a != b,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::time::sleep;
+
+    #[test]
+    fn test_cdp_endpoints_differ_same_profile_http_vs_ws() {
+        let a = "http://100.117.111.4:8080/api/profiles/86ae5c01-d36b-4beb-ab41-728febccf811/cdp";
+        let b = "ws://100.117.111.4:8080/api/profiles/86ae5c01-d36b-4beb-ab41-728febccf811/cdp";
+        assert!(!cdp_endpoints_differ(a, b));
+    }
+
+    #[test]
+    fn test_cdp_endpoints_differ_different_profile_uuids() {
+        let a = "http://100.117.111.4:8080/api/profiles/86ae5c01-d36b-4beb-ab41-728febccf811/cdp";
+        let b = "ws://100.117.111.4:8080/api/profiles/e7326b69-a3a4-427a-a5d0-f4a7386a0900/cdp";
+        assert!(cdp_endpoints_differ(a, b));
+    }
+
+    #[test]
+    fn test_cdp_endpoints_differ_port_only_same_port() {
+        let connected = "ws://127.0.0.1:9222/devtools/browser/abc";
+        assert!(!cdp_endpoints_differ("9222", connected));
+    }
+
+    #[test]
+    fn test_cdp_endpoints_differ_port_only_different_port() {
+        let connected = "ws://127.0.0.1:9222/devtools/browser/abc";
+        assert!(cdp_endpoints_differ("9223", connected));
+    }
 
     #[test]
     fn test_format_tab_id() {
