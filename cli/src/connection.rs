@@ -1318,6 +1318,36 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_daemon_env_forwards_cdp_auth() {
+        let mut options = test_daemon_options(None, false, None);
+        options.cdp_token = Some("test-token");
+        options.cdp_headers = Some(r#"{"X-Tenant":"test"}"#);
+        let mut command = Command::new("agent-browser");
+
+        apply_daemon_env(&mut command, "test-session", &options);
+
+        let envs = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            envs.get("AGENT_BROWSER_CDP_TOKEN"),
+            Some(&"test-token".to_string())
+        );
+        assert_eq!(
+            envs.get("AGENT_BROWSER_CDP_HEADERS"),
+            Some(&r#"{"X-Tenant":"test"}"#.to_string())
+        );
+    }
+
+    #[test]
     fn test_spawn_race_loser_does_not_overwrite_winner_config() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
         let dir = tempfile::tempdir().unwrap();

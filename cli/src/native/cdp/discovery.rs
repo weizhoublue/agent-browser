@@ -275,6 +275,21 @@ mod tests {
         s.write_all(response.as_bytes()).await.unwrap();
     }
 
+    async fn accept_http_and_capture_request(listener: &TcpListener, response: &str) -> String {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        stream.write_all(response.as_bytes()).await.unwrap();
+        String::from_utf8(request).unwrap()
+    }
+
     #[tokio::test]
     async fn discovers_ws_url_from_json_version() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -314,6 +329,67 @@ mod tests {
             ws_url,
             format!("ws://127.0.0.1:{}/api/profiles/test-id/cdp", port)
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefixed_discovery_sends_auth_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{}/api/profiles/test-id/cdp", port);
+        let headers = vec![
+            ("Authorization".to_string(), "Bearer test-token".to_string()),
+            ("X-Tenant".to_string(), "test".to_string()),
+        ];
+        let server = tokio::spawn(async move {
+            let request = accept_http_and_capture_request(
+                &listener,
+                &http_200(
+                    r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:1234/api/profiles/test-id/cdp"}"#,
+                ),
+            )
+            .await
+            .to_ascii_lowercase();
+            assert!(request.starts_with("get /api/profiles/test-id/cdp/json/version "));
+            assert!(request.contains("\r\nauthorization: bearer test-token\r\n"));
+            assert!(request.contains("\r\nx-tenant: test\r\n"));
+        });
+
+        let ws_url =
+            discover_cdp_http_endpoint(&base, None, Some(&headers), Duration::from_secs(2))
+                .await
+                .unwrap();
+        assert_eq!(
+            ws_url,
+            format!("ws://127.0.0.1:{}/api/profiles/test-id/cdp", port)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefixed_discovery_failure_includes_profile_path() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{}/api/profiles/test-id/cdp", port);
+        let server = tokio::spawn(async move {
+            accept_http(
+                &listener,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+            accept_http(
+                &listener,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        });
+
+        let error = discover_cdp_http_endpoint(&base, None, None, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(error.contains(&format!("{}/json/version", base)));
+        assert!(error.contains(&format!("{}/json/list", base)));
+        assert!(error.contains("HTTP 401"));
         server.await.unwrap();
     }
 
