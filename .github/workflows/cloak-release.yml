@@ -1,0 +1,346 @@
+# 用途：基于上游 tag 合并 cloak 补丁，构建三平台二进制并发布正式 GitHub Release。
+# 会强制推送 cloak 和 release/<tag> 分支，并创建或更新同名 Release。
+# 仅需构建或验证任意 Git ref 且不发布时，使用 cloak-build.yml。
+# Manual release: cherry-pick fork patches onto upstream tag, build agent-browser binaries, publish GitHub Release + release/<tag> branch.
+name: Welan Release
+
+# 第 1，配置自己的上游仓库地址  https://github.com/vercel-labs/agent-browser 
+# 第 2，根据 CI 输入的 version 号，确保它是一个上游的 tag。如果输入的 version 号为空，那么自动从上游的 tag 里面获取最新的 tag 作为 version 号来工作。
+# 第 3：找出 cloak 从最近上游 tag 开始的所有代码提交，并 cherry-pick 到目标上游 tag 分支。
+# 第 4，运行所有单元测试，确保 cherry-pick 后行为正确 。
+# 第 5，我们分别构建 macOS、ARM 的 Linux、x86 的 Linux、ARM 的二进制。
+# 第 6 ，我们将 origin 缺省分支推送到远端，并且新建一个 release/$version 的新 branch 推送到远端进行留存。
+# 第 7 ，我们发布一个 version 对应的 release, 其中带上构建物
+
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "上游 tag（如 v0.29.1）。留空则自动取上游最新 tag"
+        required: false
+        type: string
+
+concurrency:
+  group: cloak-release-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: vercel-labs/agent-browser
+  FORK_REPO: weizhoublue/agent-browser
+  ENHANCEMENT_BRANCH: cloak
+
+jobs:
+  prepare:
+    name: Detect tag, cherry-pick patches, test, push branches
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      upstream_tag: ${{ steps.meta.outputs.upstream_tag }}
+      release_branch: ${{ steps.meta.outputs.release_branch }}
+      patch_shas: ${{ steps.cherry.outputs.patch_shas }}
+
+    steps:
+      - name: Checkout (full history, all branches)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream, detect target tag, and find cloak base
+        id: meta
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git" \
+            || git remote set-url upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git"
+          git fetch upstream --tags --force
+
+          INPUT_TAG="${{ inputs.upstream_tag }}"
+          INPUT_TAG="${INPUT_TAG#"${INPUT_TAG%%[![:space:]]*}"}"
+          INPUT_TAG="${INPUT_TAG%"${INPUT_TAG##*[![:space:]]}"}"
+
+          if [ -z "$INPUT_TAG" ]; then
+            UPSTREAM_TAG=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | head -1)
+            if [ -z "$UPSTREAM_TAG" ]; then
+              echo "::error::未能从上游获取任何 tag"
+              exit 1
+            fi
+            echo "自动检测到上游最新 tag: ${UPSTREAM_TAG}"
+          else
+            UPSTREAM_TAG="$INPUT_TAG"
+            if ! git rev-parse "refs/tags/${UPSTREAM_TAG}" >/dev/null 2>&1; then
+              echo "::error::tag ${UPSTREAM_TAG} 在上游 ${UPSTREAM_REPO} 中不存在"
+              exit 1
+            fi
+            echo "使用指定 tag: ${UPSTREAM_TAG}"
+          fi
+
+          SOURCE_BASE=$(git tag --merged "origin/${{ env.ENHANCEMENT_BRANCH }}" --sort=-version:refname \
+            | grep -E '^v[0-9]' \
+            | head -1 || true)
+          if [ -z "$SOURCE_BASE" ]; then
+            echo "::error::未找到 origin/${{ env.ENHANCEMENT_BRANCH }} 所基于的上游 tag"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/${SOURCE_BASE}" "refs/tags/${UPSTREAM_TAG}"; then
+            echo "::error::cloak 基线 ${SOURCE_BASE} 不在目标上游 tag ${UPSTREAM_TAG} 的历史中"
+            exit 1
+          fi
+
+          echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
+          echo "source_base=${SOURCE_BASE}" >> "$GITHUB_OUTPUT"
+          echo "release_branch=release/${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
+          echo "cloak 基线: ${SOURCE_BASE}，目标 tag: ${UPSTREAM_TAG}"
+          git log -1 --oneline "refs/tags/${UPSTREAM_TAG}"
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Rebase fork patches onto upstream tag
+        id: cherry
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ env.ENHANCEMENT_BRANCH }}"
+
+          SOURCE_BASE="${{ steps.meta.outputs.source_base }}"
+          TARGET_TAG="${{ steps.meta.outputs.upstream_tag }}"
+          PATCHES=()
+          while IFS= read -r SHA; do
+            if git diff-tree --no-commit-id --name-only -r "$SHA" | grep -qv '^\.github/workflows/'; then
+              PATCHES+=("$SHA")
+            fi
+          done < <(git rev-list --reverse "${SOURCE_BASE}..origin/${{ env.ENHANCEMENT_BRANCH }}")
+          echo "找到 ${#PATCHES[@]} 个代码补丁：${PATCHES[*]:-无}"
+
+          if [ "$SOURCE_BASE" = "$TARGET_TAG" ]; then
+            # 当前 cloak 已基于目标 tag，无需重复 cherry-pick。
+            git checkout -B "${{ env.ENHANCEMENT_BRANCH }}" "origin/${{ env.ENHANCEMENT_BRANCH }}"
+          else
+            git checkout -B "${{ env.ENHANCEMENT_BRANCH }}" "refs/tags/${TARGET_TAG}"
+            for SHA in "${PATCHES[@]}"; do
+              echo "cherry-pick: $SHA"
+              if ! git cherry-pick "$SHA"; then
+                echo "::error::cherry-pick $SHA 失败，请将 cloak 分支 rebase 到 ${TARGET_TAG} 后重新触发"
+                git cherry-pick --abort || true
+                exit 1
+              fi
+            done
+          fi
+
+          # 恢复 fork 自身的 CI workflows，防止被上游内容覆盖
+          git checkout "origin/${{ env.ENHANCEMENT_BRANCH }}" -- .github/workflows/
+          if ! git diff --quiet -- .github/workflows/; then
+            git add .github/workflows/
+            git commit -m "Restore fork workflows after cherry-pick"
+          fi
+
+          # 输出 patch SHA 列表（oldest-first，空格分隔）
+          PATCH_SHAS="${PATCHES[*]}"
+          echo "patch_shas=${PATCH_SHAS}" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests
+        run: |
+          set -euo pipefail
+          cd cli
+          cargo test
+
+      - name: Push cloak branch and release archive
+        run: |
+          set -euo pipefail
+          git push origin HEAD:"${{ env.ENHANCEMENT_BRANCH }}" --force
+          echo "Updated origin/${{ env.ENHANCEMENT_BRANCH }}"
+
+          BRANCH="${{ steps.meta.outputs.release_branch }}"
+          git push origin HEAD:"$BRANCH" --force
+          echo "Archived source snapshot at origin/${BRANCH}"
+
+  build-binaries:
+    name: Build ${{ matrix.artifact }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: agent-browser-linux-amd64
+            use_zigbuild: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: agent-browser-linux-arm64
+            use_zigbuild: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: agent-browser-darwin-arm64
+            use_zigbuild: false
+
+    steps:
+      - name: Checkout cloak branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.ENHANCEMENT_BRANCH }}
+          fetch-depth: 1
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu
+
+      - name: Install cargo-zigbuild
+        if: matrix.use_zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild --locked
+
+      - name: Configure Rust linkers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+          shared-key: cloak-release-${{ needs.prepare.outputs.upstream_tag }}
+
+      - name: Build with zigbuild
+        if: matrix.use_zigbuild
+        run: cargo zigbuild --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Build with cargo
+        if: '!matrix.use_zigbuild'
+        run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Package agent-browser binary
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          SRC="cli/target/${{ matrix.target }}/release/agent-browser"
+          DEST="artifacts/${{ matrix.artifact }}"
+          cp "$SRC" "$DEST"
+          chmod +x "$DEST"
+          ls -la artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/${{ matrix.artifact }}
+          retention-days: 14
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [prepare, build-binaries]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout cloak (required by gh release)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.ENHANCEMENT_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v7
+        with:
+          path: dist/
+          pattern: agent-browser-*
+          merge-multiple: true
+
+      - name: Verify binaries
+        run: |
+          set -euo pipefail
+          EXPECTED=(
+            agent-browser-linux-amd64
+            agent-browser-linux-arm64
+            agent-browser-darwin-arm64
+          )
+          MIN_SIZE=100000
+          ERR=0
+          for f in "${EXPECTED[@]}"; do
+            if [ ! -f "dist/$f" ]; then
+              echo "::error::Missing dist/$f"
+              ERR=1
+              continue
+            fi
+            SIZE=$(stat -c%s "dist/$f")
+            if [ "$SIZE" -lt "$MIN_SIZE" ]; then
+              echo "::error::dist/$f too small ($SIZE bytes)"
+              ERR=1
+            else
+              echo "OK dist/$f ($SIZE bytes)"
+              sha256sum "dist/$f" >> dist/SHA256SUMS
+            fi
+          done
+          [ "$ERR" -eq 0 ]
+          cat dist/SHA256SUMS
+
+      - name: Write release notes
+        env:
+          TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          BRANCH: ${{ needs.prepare.outputs.release_branch }}
+          PATCH_SHAS: ${{ needs.prepare.outputs.patch_shas }}
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+          FORK_REPO: ${{ env.FORK_REPO }}
+          ENHANCEMENT_BRANCH: ${{ env.ENHANCEMENT_BRANCH }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## agent-browser ${TAG} (fork)"
+            echo
+            echo "- **Upstream base**: [\`${UPSTREAM_REPO}\`](https://github.com/${UPSTREAM_REPO}) tag \`${TAG}\`"
+            echo "- **Fork patches** cherry-picked from \`${ENHANCEMENT_BRANCH}\`:"
+            for SHA in $PATCH_SHAS; do
+              MSG=$(git log -1 --format="%s" "$SHA" 2>/dev/null || echo "(unknown)")
+              echo "  - \`${SHA:0:7}\` ${MSG}"
+            done
+            echo "- **Archive branch**: \`${BRANCH}\`"
+            echo "- **Binaries**: \`agent-browser\` (platform-specific release filenames)"
+            echo
+            echo "### Assets"
+            echo
+            echo "| File | Platform |"
+            echo "|------|----------|"
+            echo "| \`agent-browser-linux-amd64\` | Linux x86_64 |"
+            echo "| \`agent-browser-linux-arm64\` | Linux ARM64 |"
+            echo "| \`agent-browser-darwin-arm64\` | macOS Apple Silicon |"
+            echo
+            echo "Verify checksums: \`sha256sum -c SHA256SUMS\`"
+            echo
+            echo "Usage: [get-started.md](https://github.com/${FORK_REPO}/blob/${BRANCH}/get-started.md)"
+          } > /tmp/release-notes.md
+          cat /tmp/release-notes.md
+
+      - name: Create or update GitHub Release
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.prepare.outputs.upstream_tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists, uploading assets (clobber)..."
+            gh release upload "$TAG" dist/agent-browser-* dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" \
+              --title "agent-browser ${TAG}" \
+              --notes-file /tmp/release-notes.md \
+              dist/agent-browser-* dist/SHA256SUMS
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

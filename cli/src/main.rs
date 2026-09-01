@@ -1,4 +1,5 @@
 mod ca_bundle;
+mod cdp_auth;
 mod chat;
 mod color;
 mod commands;
@@ -51,6 +52,12 @@ fn serialize_json_value(value: &serde_json::Value) -> String {
 
 fn print_json_value(value: serde_json::Value) {
     println!("{}", serialize_json_value(&value));
+}
+
+/// True when the parsed command is an explicit CDP connect (`launch` + `cdpUrl` / `cdpPort`).
+fn command_has_explicit_cdp_endpoint(cmd: &serde_json::Value) -> bool {
+    cmd.get("action").and_then(|v| v.as_str()) == Some("launch")
+        && (cmd.get("cdpUrl").is_some() || cmd.get("cdpPort").is_some())
 }
 
 fn print_json_error(message: impl AsRef<str>) {
@@ -1551,6 +1558,12 @@ fn main() {
         }
     };
 
+    cdp_auth::apply_launch_cdp_auth(
+        &mut cmd,
+        flags.cdp_token.as_deref(),
+        flags.cdp_headers.as_deref(),
+    );
+
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
         if cmd.get("password").is_some() {
@@ -1718,6 +1731,8 @@ fn main() {
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
+        cdp_token: flags.cdp_token.as_deref(),
+        cdp_headers: flags.cdp_headers.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
         plugins: Some(plugin_registry_json.as_str()),
     };
@@ -1844,43 +1859,53 @@ fn main() {
             })
         };
 
-        let mut launch_cmd = launch_cmd;
-        attach_script_launch_options(&mut launch_cmd, &flags);
-        attach_webmcp_launch_option(&mut launch_cmd, &flags);
-        attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
-        attach_pin_tab_to_command(&mut launch_cmd, &flags);
-        attach_restore_config_to_command(&mut launch_cmd, &flags);
+        // Skip config/default CDP auto-launch when the user command is `connect <url|port>`
+        // so we do not connect to config profile A before `connect` profile B runs.
+        if !daemon_result.already_running && !command_has_explicit_cdp_endpoint(&cmd) {
+            let mut launch_cmd = launch_cmd;
+            attach_script_launch_options(&mut launch_cmd, &flags);
+            attach_webmcp_launch_option(&mut launch_cmd, &flags);
+            attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
+            attach_pin_tab_to_command(&mut launch_cmd, &flags);
+            attach_restore_config_to_command(&mut launch_cmd, &flags);
 
-        if flags.ignore_https_errors {
-            launch_cmd["ignoreHTTPSErrors"] = json!(true);
-        }
-
-        attach_ca_cert_to_launch_command(&mut launch_cmd, &flags);
-
-        if let Some(ref cs) = flags.color_scheme {
-            launch_cmd["colorScheme"] = json!(cs);
-        }
-
-        if let Some(ref dp) = flags.download_path {
-            launch_cmd["downloadPath"] = json!(dp);
-        }
-
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
-                resp.error
-                    .unwrap_or_else(|| "CDP connection failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
-        };
-
-        if let Some(msg) = err {
-            if flags.json {
-                print_json_error(msg);
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
+            if flags.ignore_https_errors {
+                launch_cmd["ignoreHTTPSErrors"] = json!(true);
             }
-            exit(1);
+
+            attach_ca_cert_to_launch_command(&mut launch_cmd, &flags);
+
+            if let Some(ref cs) = flags.color_scheme {
+                launch_cmd["colorScheme"] = json!(cs);
+            }
+
+            if let Some(ref dp) = flags.download_path {
+                launch_cmd["downloadPath"] = json!(dp);
+            }
+
+            cdp_auth::apply_launch_cdp_auth(
+                &mut launch_cmd,
+                flags.cdp_token.as_deref(),
+                flags.cdp_headers.as_deref(),
+            );
+
+            let err = match send_command(launch_cmd, &flags.session) {
+                Ok(resp) if resp.success => None,
+                Ok(resp) => Some(
+                    resp.error
+                        .unwrap_or_else(|| "CDP connection failed".to_string()),
+                ),
+                Err(e) => Some(e.to_string()),
+            };
+
+            if let Some(msg) = err {
+                if flags.json {
+                    print_json_error(msg);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), msg);
+                }
+                exit(1);
+            }
         }
     }
 
@@ -2362,6 +2387,22 @@ mod tests {
                 "unexpectedly accepted {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_command_has_explicit_cdp_endpoint() {
+        assert!(command_has_explicit_cdp_endpoint(&json!({
+            "action": "launch",
+            "cdpUrl": "http://localhost/cdp"
+        })));
+        assert!(command_has_explicit_cdp_endpoint(&json!({
+            "action": "launch",
+            "cdpPort": 9222
+        })));
+        assert!(!command_has_explicit_cdp_endpoint(&json!({
+            "action": "navigate",
+            "url": "https://example.com"
+        })));
     }
 
     #[test]
