@@ -522,4 +522,60 @@ mod tests {
         assert_eq!(path_rx.await.unwrap(), "/?token=a%2Fb&scope=browser%20test");
         server.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn websocket_connect_sends_auth_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (headers_tx, headers_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut headers_tx = Some(headers_tx);
+            tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |
+                    request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                    response: tokio_tungstenite::tungstenite::handshake::server::Response,
+                | {
+                    if let Some(tx) = headers_tx.take() {
+                        let authorization = request
+                            .headers()
+                            .get("authorization")
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_string();
+                        let tenant = request
+                            .headers()
+                            .get("x-tenant")
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_string();
+                        let _ = tx.send((authorization, tenant));
+                    }
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let _client = CdpClient::connect_with_headers(
+            &format!("ws://127.0.0.1:{}/api/profiles/test-id/cdp", port),
+            Some(vec![
+                ("Authorization".to_string(), "Bearer test-token".to_string()),
+                ("X-Tenant".to_string(), "test".to_string()),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            headers_rx.await.unwrap(),
+            ("Bearer test-token".to_string(), "test".to_string())
+        );
+        server.await.unwrap();
+    }
 }

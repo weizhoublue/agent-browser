@@ -467,6 +467,8 @@ pub struct DaemonOptions<'a> {
     pub idle_timeout: Option<&'a str>,
     pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
+    pub cdp_token: Option<&'a str>,
+    pub cdp_headers: Option<&'a str>,
     pub no_auto_dialog: bool,
     pub plugins: Option<&'a str>,
 }
@@ -580,6 +582,12 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
+    }
+    if let Some(token) = opts.cdp_token {
+        cmd.env("AGENT_BROWSER_CDP_TOKEN", token);
+    }
+    if let Some(headers) = opts.cdp_headers {
+        cmd.env("AGENT_BROWSER_CDP_HEADERS", headers);
     }
     if opts.no_auto_dialog {
         cmd.env("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
@@ -1279,6 +1287,8 @@ mod tests {
             idle_timeout,
             default_timeout: None,
             cdp: None,
+            cdp_token: None,
+            cdp_headers: None,
             no_auto_dialog,
             plugins: None,
         }
@@ -1304,6 +1314,36 @@ mod tests {
             daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&domains_changed),
             "allowed domains are browser launch state, not daemon identity"
+        );
+    }
+
+    #[test]
+    fn test_apply_daemon_env_forwards_cdp_auth() {
+        let mut options = test_daemon_options(None, false, None);
+        options.cdp_token = Some("test-token");
+        options.cdp_headers = Some(r#"{"X-Tenant":"test"}"#);
+        let mut command = Command::new("agent-browser");
+
+        apply_daemon_env(&mut command, "test-session", &options);
+
+        let envs = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            envs.get("AGENT_BROWSER_CDP_TOKEN"),
+            Some(&"test-token".to_string())
+        );
+        assert_eq!(
+            envs.get("AGENT_BROWSER_CDP_HEADERS"),
+            Some(&r#"{"X-Tenant":"test"}"#.to_string())
         );
     }
 

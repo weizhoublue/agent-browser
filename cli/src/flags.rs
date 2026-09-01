@@ -85,6 +85,8 @@ pub struct Config {
     pub clear_ca_cert: Option<bool>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
+    pub cdp_token: Option<String>,
+    pub cdp_headers: Option<String>,
     pub auto_connect: Option<bool>,
     pub pin_tab: Option<bool>,
     pub headers: Option<String>,
@@ -168,6 +170,8 @@ impl Config {
             clear_ca_cert,
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
+            cdp_token: other.cdp_token.or(self.cdp_token),
+            cdp_headers: other.cdp_headers.or(self.cdp_headers),
             auto_connect: other.auto_connect.or(self.auto_connect),
             pin_tab: other.pin_tab.or(self.pin_tab),
             headers: other.headers.or(self.headers),
@@ -288,6 +292,8 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--headers",
         "--executable-path",
         "--cdp",
+        "--cdp-token",
+        "--cdp-headers",
         "--extension",
         "--init-script",
         "--enable",
@@ -375,6 +381,8 @@ pub struct Flags {
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
+    pub cdp_token: Option<String>,
+    pub cdp_headers: Option<String>,
     pub extensions: Vec<String>,
     pub init_scripts: Vec<String>,
     pub enable: Vec<String>,
@@ -555,6 +563,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.executable_path),
         cdp: env::var("AGENT_BROWSER_CDP").ok().or(config.cdp),
+        cdp_token: env::var("AGENT_BROWSER_CDP_TOKEN")
+            .ok()
+            .or(config.cdp_token),
+        cdp_headers: env::var("AGENT_BROWSER_CDP_HEADERS")
+            .ok()
+            .or(config.cdp_headers),
         extensions,
         init_scripts,
         enable,
@@ -843,6 +857,18 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.cdp = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--cdp-token" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.cdp_token = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--cdp-headers" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.cdp_headers = Some(s.clone());
                     i += 1;
                 }
             }
@@ -1155,6 +1181,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--headers",
         "--executable-path",
         "--cdp",
+        "--cdp-token",
+        "--cdp-headers",
         "--extension",
         "--init-script",
         "--enable",
@@ -1771,6 +1799,40 @@ mod tests {
 
         let _ = fs::remove_file(&config_path);
         let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_parse_flags_loads_cdp_auth_from_config() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_CDP_TOKEN",
+            "AGENT_BROWSER_CDP_HEADERS",
+        ]);
+        guard.remove("AGENT_BROWSER_CDP");
+        guard.remove("AGENT_BROWSER_CDP_TOKEN");
+        guard.remove("AGENT_BROWSER_CDP_HEADERS");
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        fs::write(
+            &config_path,
+            r#"{"cdp":"http://127.0.0.1:8080/api/profiles/test/cdp","cdpToken":"test-token","cdpHeaders":"{\"X-Tenant\":\"test\"}"}"#,
+        )
+        .unwrap();
+
+        let flags = parse_flags(&[
+            "--config".to_string(),
+            config_path.to_string_lossy().to_string(),
+            "open".to_string(),
+            "example.com".to_string(),
+        ]);
+
+        assert_eq!(
+            flags.cdp.as_deref(),
+            Some("http://127.0.0.1:8080/api/profiles/test/cdp")
+        );
+        assert_eq!(flags.cdp_token.as_deref(), Some("test-token"));
+        assert_eq!(flags.cdp_headers.as_deref(), Some(r#"{"X-Tenant":"test"}"#));
     }
 
     #[test]
